@@ -1,25 +1,51 @@
-dynamo_db_dict
-==============
+pg4geks
+=======
 
-Simple Python interface to [Amazon DynamoDB](http://aws.amazon.com/dynamodb/),  
-adding some dict-like sugar to [`boto.dynamodb.layer2`](http://boto.cloudhackers.com/en/latest/ref/dynamodb.html#module-boto.dynamodb.layer2).
+PostgreSQL for Gevent kept Simple.
+
+Provides:
+* db(sql, *values).row|s
+* id = db_insert(**kw)
+* db_update(**kw)
+* with db_transaction
+* patch, pool, reconnect, retry.
 
 Usage:
 
-    pip install dynamo_db_dict
-    from dynamo_db_dict import dynamo_db
+    sudo apt-get install --yes gcc libevent-dev libpq-dev python-dev
+    sudo pip install pg4geks
 
-    db = dynamo_db(aws_access_key_id='YOUR KEY HERE', aws_secret_access_key='YOUR SECRET KEY HERE') # or via: os.environ, ~/.boto, /etc/boto.cfg
-    # Set table_name_prefix='YOUR_PROJECT_NAME_' if you use the same DynamoDB account for several projects.
+    from pg4geks import db, db_config, db_transaction
+    db_config(name='test', user='user', password='password')
+    # Defaults: host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True
 
-    # Either create table "user" with hash_key "email" via AWS concole, or via inherited db.create_table(...).
-    db.user['john@example.com'] = dict(first_name='John', last_name='Johnson') # Put. No need to repeat "email" in dict(...).
-    john = db.user['john@example.com'] # Get.
-    assert john == dict(email='john@example.com', first_name='John', last_name='Johnson') # Complete item, with "email".
-    assert john['first_name'] == 'John' # Key access.
-    assert john.first_name == 'John' # Attr access.
-    del db.user['john@example.com'] # Delete.
+    row = db('SELECT column FROM table WHERE id = %s', id).row
+    assert row.column == row['column'] or row is None
 
-dynamo_db_dict version 0.2.4  
-Copyright (C) 2012 by Denis Ryzhkov <denis@ryzhkov.org>  
+    return db('SELECT * FROM table WHERE related_id IN %s AND parent_id = %s', tuple(related_ids), parent_id).rows
+    # Please note that tuple() should be used with IN %s, to keep list [] for PostgreSQL Array operations.
+    # http://pythonhosted.org/psycopg2/usage.html#adaptation-of-python-values-to-sql-types
+
+    return [
+        processed(row)
+        for row in db('SELECT * FROM table LIMIT 10')
+    ] # Please note that no ').rows' is required on iteration.
+
+    with db_transaction():
+        db('INSERT INTO table1 (quantity) VALUES (%s)', -100)
+        db('INSERT INTO table2 (quantity) VALUES (%s)', +1/0)
+
+    id = db_insert('table',
+        related_id=related_id,
+        parent_id=parent_id,
+        _return='id',
+    )
+
+    db_update('table',
+        related_id=None,
+        where=dict(id=id),
+    )
+
+pg4geks version 0.1.0  
+Copyright (C) 2013 by Denis Ryzhkov <denisr@denisr.com>  
 MIT License, see http://opensource.org/licenses/MIT
