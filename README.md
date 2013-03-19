@@ -1,13 +1,16 @@
 pg4geks
 =======
 
-PostgreSQL for Gevent kept Simple.
+[PostgreSQL][] for [Gevent][] kept [Simple][].
+[PostgreSQL]: http://www.postgresql.org/
+[Gevent]: http://www.gevent.org/
+[Simple]: http://en.wikipedia.org/wiki/KISS_principle
 
 Provides:
-* db(sql, *values).row|s
-* id = db_insert(**kw)
-* db_update(**kw)
-* with db_transaction
+* `db(sql, *values).row|s`
+* `id = db_insert(**kw)`
+* `db_update(**kw)`
+* `with db_transaction`
 * patch, pool, reconnect, retry.
 
 Usage:
