@@ -6,6 +6,7 @@ setup(
     description='PostgreSQL for Gevent kept Simple.',
     long_description='''
 Provides:
+
 * ``db(sql, *values).row|s``
 * ``id = db_insert(**kw)``
 * ``db_update(**kw)``
