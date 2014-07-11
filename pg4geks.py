@@ -7,7 +7,8 @@ Provides:
 * id = db_insert(**kw)
 * db_update(**kw)
 * with db_transaction
-* patch, pool, reconnect, retry.
+* raise db_rollback
+* patch, log, pool, reconnect, retry.
 
 Usage:
 
@@ -16,7 +17,7 @@ Usage:
 
     from pg4geks import db, db_config, db_transaction
     db_config(name='test', user='user', password='password')
-    # Defaults: host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True
+    # Defaults: host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True, log=None
 
     row = db('SELECT column FROM table WHERE id = %s', id).row
     assert row.column == row['column'] or row is None
@@ -30,9 +31,16 @@ Usage:
         for row in db('SELECT * FROM table LIMIT 10')
     ] # Please note that no ').rows' is required on iteration.
 
-    with db_transaction():
-        db('INSERT INTO table1 (quantity) VALUES (%s)', -100)
-        db('INSERT INTO table2 (quantity) VALUES (%s)', +1/0)
+    try:
+
+        with db_transaction():
+            db('INSERT INTO table1 (quantity) VALUES (%s)', -100)
+            db('INSERT INTO table2 (quantity) VALUES (%s)', +1/0)
+
+            if error:
+                raise db_rollback
+    except db_rollback:
+        pass # Or not.
 
     id = db_insert('table',
         related_id=related_id,
@@ -45,8 +53,8 @@ Usage:
         where=dict(id=id),
     )
 
-pg4geks version 0.1.0
-Copyright (C) 2013 by Denis Ryzhkov <denisr@denisr.com>
+pg4geks version 0.1.1
+Copyright (C) 2013-2014 by Denis Ryzhkov <denisr@denisr.com>
 MIT License, see http://opensource.org/licenses/MIT
 '''
 
@@ -66,10 +74,11 @@ from psycopg2 import connect, Error, extensions, OperationalError, ProgrammingEr
 from psycopg2.extras import RealDictCursor
 from Queue import Empty
 
-#### db_config, _db_pool, patch_psycopg2_with_gevent
+#### db_config, _db_pool, patch_psycopg2_with_gevent, log
 
 _db_config = {}
 _db_pool = gevent.queue.Queue()
+_log = None
 
 def _gevent_wait_callback(conn, timeout=None):
     # From https://github.com/SiteSupport/gevent/blob/master/examples/psycopg2_pool.py
@@ -84,7 +93,7 @@ def _gevent_wait_callback(conn, timeout=None):
         else:
             raise OperationalError('Bad result from poll: %r' % state)
 
-def db_config(name, user, password, host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True, **kwargs):
+def db_config(name, user, password, host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True, log=None, **kwargs):
 
     #### _db_config
 
@@ -116,6 +125,11 @@ def db_config(name, user, password, host='127.0.0.1', port=5432, pool_size=10, p
     if patch_psycopg2_with_gevent:
         extensions.set_wait_callback(_gevent_wait_callback)
 
+    #### log
+
+    global _log
+    _log = log
+
 #### db_transaction
 
 _db_transaction = gevent.local.local()
@@ -146,6 +160,9 @@ def db_transaction():
             _db_pool.put(_db_transaction.db_connection)
             del _db_transaction.db_connection
 
+class db_rollback(Exception):
+    pass
+
 #### db
 
 _reconnect_sleep_seconds = 1
@@ -162,6 +179,9 @@ class db(object):
                 try:
                     cursor = _db_transaction.db_connection.cursor(cursor_factory=RealDictCursor)
                     try:
+
+                        if _log:
+                            _log((sql, values))
 
                         cursor.execute(sql, values)
                         # Use INSERT ... RETURNING instead of cursor.lastrowid: http://pythonhosted.org/psycopg2/cursor.html#cursor.lastrowid
@@ -316,8 +336,8 @@ def test():
             assert db('SELECT id FROM test_item WHERE id = %s', item2_id).row.id == item2_id
             db('DELETE FROM test_item WHERE id = %s', item2_id)
             assert db('SELECT id FROM test_item WHERE id = %s', item2_id).row is None
-            1/0
-    except ZeroDivisionError:
+            raise db_rollback
+    except db_rollback:
         pass
 
     items = db('SELECT id FROM test_item WHERE id IN %s', (item1_id, item2_id))
