@@ -1,46 +1,53 @@
 
 '''
-pg4geks - PostgreSQL for Gevent kept Simple.
+pg4geks - PostgreSQL for Gevent kept Simple
 
 Provides:
-* db(sql, *values).row|s
-* id = db_insert(**kw)
-* db_update(**kw)
-* with db_transaction
+* db(sql, *values).row/rows/affected
+* id = db_insert(table_name, _return='id', name=value,..)
+* affected = db_update(table_name, where=dict(name=value, item_in=tuple_of_values), name=value,..)
+* result = db_transaction(code)
 * raise db_rollback
-* patch, log, pool, reconnect, retry.
+* db("""ALTER TYPE "my_type" ADD VALUE 'my_value'""", autocommit=True)  # Avoid "cannot run inside a transaction block".
+* db('SELECT * FROM "table" WHERE "name" LIKE %s', escape_like(fragment))
+* connection pool
+* auto reconnect and retry
+* optional log of each query
 
 Usage:
 
     sudo apt-get install --yes gcc libevent-dev libpq-dev python-dev
     sudo pip install pg4geks
 
-    from pg4geks import db, db_config, db_transaction
+    from pg4geks import db, db_config, db_insert, db_update, db_transaction
     db_config(name='test', user='user', password='password')
     # Defaults: host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True, log=None
 
-    row = db('SELECT column FROM table WHERE id = %s', id).row
-    assert row.column == row['column'] or row is None
+    row = db('SELECT "column" FROM "table" WHERE "id" = %s', id).row
+    assert row is None or row.column == row['column']
 
-    return db('SELECT * FROM table WHERE related_id IN %s AND parent_id = %s', tuple(related_ids), parent_id).rows
-    # Please note that tuple() should be used with IN %s, to keep list [] for PostgreSQL Array operations.
+    return db('SELECT * FROM "table" WHERE "related_id" IN %s AND "parent_id" = %s', tuple(related_ids), parent_id).rows
+    # Please note that "tuple()" should be used with "IN %s", to keep "list []" for PostgreSQL Array operations.
     # http://pythonhosted.org/psycopg2/usage.html#adaptation-of-python-values-to-sql-types
 
     return [
         processed(row)
-        for row in db('SELECT * FROM table LIMIT 10')
-    ] # Please note that no ').rows' is required on iteration.
+        for row in db('SELECT * FROM "table" LIMIT 10')
+    ]  # Please note that no ").rows" is required for iteration.
 
     try:
-
-        with db_transaction():
-            db('INSERT INTO table1 (quantity) VALUES (%s)', -100)
-            db('INSERT INTO table2 (quantity) VALUES (%s)', +1/0)
+        def code():
+            db('INSERT INTO "table1" ("quantity") VALUES (%s)', -100)
+            db('INSERT INTO "table2" ("quantity") VALUES (%s)', +1/0)
 
             if error:
                 raise db_rollback
+
+            return result
+        result = db_transaction(code)
+
     except db_rollback:
-        pass # Or not.
+        pass  # Or not.
 
     id = db_insert('table',
         related_id=related_id,
@@ -48,41 +55,48 @@ Usage:
         _return='id',
     )
 
-    db_update('table',
+    assert db_update('table',
         related_id=None,
-        where=dict(id=id),
-    )
+        where=dict(id=id),  # Or: id=tuple(ids_to_update)
+    ) == 1
 
-pg4geks version 0.1.1
-Copyright (C) 2013-2014 by Denis Ryzhkov <denisr@denisr.com>
+    # See tests for more usage examples.
+
+pg4geks version 0.2.0
+Copyright (C) 2013-2016 by Denis Ryzhkov <denisr@denisr.com>
 MIT License, see http://opensource.org/licenses/MIT
 '''
 
-#### prepare for test(): become cooperative
+### prepare for test(): become cooperative
 
 if __name__ == '__main__':
     import gevent.monkey
     gevent.monkey.patch_all()
 
-#### import
+### import
 
 from adict import adict
-from contextlib import contextmanager
-import gevent, gevent.local, gevent.queue
+import gevent
+from gevent.local import local
+from gevent.queue import Queue, Empty
 from gevent.socket import wait_read, wait_write
 from psycopg2 import connect, Error, extensions, OperationalError, ProgrammingError
 from psycopg2.extras import RealDictCursor
-from Queue import Empty
+import sys
 
-#### db_config, _db_pool, patch_psycopg2_with_gevent, log
+### init
 
 _db_config = {}
-_db_pool = gevent.queue.Queue()
+_db_pool = Queue()
+_local = local()
 _log = None
 
+class db_rollback(Exception):
+    pass
+
 def _gevent_wait_callback(conn, timeout=None):
-    # From https://github.com/SiteSupport/gevent/blob/master/examples/psycopg2_pool.py
-    while True:
+    # From https://github.com/gevent/gevent/blob/master/examples/psycopg2_pool.py#L19
+    while 1:
         state = conn.poll()
         if state == extensions.POLL_OK:
             break
@@ -93,213 +107,237 @@ def _gevent_wait_callback(conn, timeout=None):
         else:
             raise OperationalError('Bad result from poll: %r' % state)
 
+### db_config
+
 def db_config(name, user, password, host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True, log=None, **kwargs):
 
-    #### _db_config
+    ### _db_config
 
     _db_config.clear()
     _db_config.update(database=name, user=user, password=password, host=host, port=port, **kwargs)
 
-    #### pool
+    ### pool
 
     global _db_pool
     connections_to_create = pool_size - _db_pool.qsize()
 
-    if connections_to_create > 0: # Create connections.
+    if connections_to_create > 0:  # Create connections.
         for _ in xrange(connections_to_create):
             _db_pool.put(connect(**_db_config))
 
-    else: # Delete connections.
+    else:  # Delete connections.
         for _ in xrange(-connections_to_create):
             try:
-                db_connection = _db_pool.get(block=False)
+                db_conn = _db_pool.get(block=False)
             except Empty:
                 break
             try:
-                db_connection.close()
+                db_conn.close()
             except Exception:
                 pass
 
-    #### patch_psycopg2_with_gevent
+    ### patch_psycopg2_with_gevent
 
     if patch_psycopg2_with_gevent:
         extensions.set_wait_callback(_gevent_wait_callback)
 
-    #### log
+    ### log
 
     global _log
     _log = log
 
-#### db_transaction
+### db_transaction
 
-_db_transaction = gevent.local.local()
+def db_transaction(code, initial_seconds=0.1, max_seconds=10.0, autocommit=False):
 
-@contextmanager
-def db_transaction():
+    ### if aready inside a transaction
 
-    # Do not use auto wraping of each api action into db_transaction(), for not to limit concurrency of [db]stateless actions with pool_size.
+    if hasattr(_local, 'db_conn'):
+        return code()
 
-    if hasattr(_db_transaction, 'db_connection'):
-        yield # Already inside a transaction.
+    ### create transaction
 
-    else: # Create transaction.
-        _db_transaction.db_connection = _db_pool.get(block=True)
-        try:
-            yield
+    db_conn = _local.db_conn = _db_pool.get(block=True)
+    try:  # Always return to the pool in "finally".
+        db_conn.autocommit = autocommit
 
-        except Exception:
-            if not _db_transaction.db_connection.closed:
-                _db_transaction.db_connection.rollback()
-            raise
+        ### retry
 
-        else:
-            _db_transaction.db_connection.commit()
+        while 1:
+            try:
+                result = code()
+                db_conn.commit()
+                return result
 
-        finally:
-            # Broken connections are reconnected inside db(), so just return it to pool here.
-            _db_pool.put(_db_transaction.db_connection)
-            del _db_transaction.db_connection
+            ### error
 
-class db_rollback(Exception):
-    pass
+            except Exception:
+                e_type, e_value, e_traceback = sys.exc_info()
+                e_repr = repr(e_value)
 
-#### db
+                ### rollback
 
-_reconnect_sleep_seconds = 1
+                try:
+                    db_conn.rollback()
+                except Exception:
+                    pass
+
+                ### reconnect
+
+                if (
+                    'connection has been closed unexpectedly' in e_repr or
+                    'connection already closed' in e_repr
+                ):
+                    seconds_before_reconnect = initial_seconds
+                    while 1:
+
+                        try:
+                            db_conn.close()
+                        except Exception:
+                            pass
+
+                        try:
+                            db_conn = _local.db_conn = connect(**_db_config)
+                        except Exception:
+                            seconds_before_reconnect = min(max_seconds, seconds_before_reconnect * 2)
+                        else:
+                            break
+
+                        gevent.sleep(seconds_before_reconnect)
+                    continue
+
+                ### raise other errors
+
+                raise e_type, e_value, e_traceback
+
+    ### return connection to the pool
+
+    finally:
+        _db_pool.put(db_conn)
+        del _local.db_conn
+
+### db
 
 class db(object):
 
-    #### execute and fetch
+    ### execute and fetch
 
-    def __init__(self, sql, *values):
-        with db_transaction(): # Noop if already inside a transaction. Anyway now _db_transaction.db_connection is ready to be used with correct transaction borders.
+    def __init__(self, sql, *values, **params):
+        def code():
+            with _local.db_conn.cursor(cursor_factory=RealDictCursor) as cursor:
 
-            done = False
-            while not done:
+                if _log:
+                    _log((sql, values))
+
+                cursor.execute(sql, values)
+                # Use "INSERT ... RETURNING" instead of "cursor.lastrowid":
+                # http://pythonhosted.org/psycopg2/cursor.html#cursor.lastrowid
+
+                affected = cursor.rowcount
                 try:
-                    cursor = _db_transaction.db_connection.cursor(cursor_factory=RealDictCursor)
-                    try:
-
-                        if _log:
-                            _log((sql, values))
-
-                        cursor.execute(sql, values)
-                        # Use INSERT ... RETURNING instead of cursor.lastrowid: http://pythonhosted.org/psycopg2/cursor.html#cursor.lastrowid
-
-                        try:
-                            self.rows = [adict(row) for row in cursor.fetchall()] if cursor.rowcount else []
-                        except ProgrammingError as e:
-                            if 'no results to fetch' in repr(e):
-                                self.rows = []
-                            else:
-                                raise
-
-                        self.row = self.rows[0] if self.rows else None
-                        done = True
-
-                    finally:
-                        cursor.close()
-
-                #### reconnect and retry
-
-                except Error as e:
-                    repr_e = repr(e)
-                    if not (
-                        'connection has been closed unexpectedly' in repr_e or
-                        'connection already closed' in repr_e
-                    ):
+                    rows = [adict(row) for row in cursor.fetchall()] if affected else []
+                except ProgrammingError as e:
+                    if 'no results to fetch' in repr(e):
+                        rows = []
+                    else:
                         raise
 
-                    reconnected = False
-                    while not reconnected:
-                        try:
-                            _db_transaction.db_connection = connect(**_db_config)
+                return rows, affected
 
-                        except Exception as e:
-                            if 'connection failed' not in repr(e):
-                                raise
-                            gevent.sleep(_reconnect_sleep_seconds)
+        self.rows, self.affected = db_transaction(code, **params)
+        # "db_transaction(code)" is just "code()" if already inside a transaction.
 
-                        else:
-                            reconnected = True
+        self.row = self.rows[0] if self.rows else None
 
-    #### iterate
+    ### iterate
 
     def __iter__(self):
         return iter(self.rows)
 
-#### db_insert
+### db_insert
 
 def db_insert(table_name, _return=None, **names_values):
-    row = db('INSERT INTO {table_name} {names_values} {_return}'.format(
+    row = db('INSERT INTO "{table_name}" {names_values}{_return}'.format(
         table_name=table_name,
         names_values=(
             '({names}) VALUES ({placeholders})'.format(
-                names=', '.join(names_values.keys()),
+                names=', '.join('"{name}"'.format(name=name) for name in names_values.keys()),
                 placeholders=', '.join(['%s'] * len(names_values)),
             ) if names_values else 'DEFAULT VALUES'
         ),
-        _return=('RETURNING {_return}'.format(_return=_return) if _return else ''),
+        _return=(' RETURNING "{_return}"'.format(_return=_return) if _return else ''),
     ), *names_values.values()).row
     return row[_return] if _return else None
 
-#### db_update
+### db_update
 
 def db_update(table_name, where, **names_values):
     assert isinstance(where, dict), type(where)
-    where_sql = ' AND '.join('{name} = %s'.format(name=name) for name in where.keys())
-    db('UPDATE {table_name} SET {names_values_sql} WHERE {where_sql}'.format(
+    return db('UPDATE "{table_name}" SET {names_values_sql} WHERE {where_sql}'.format(
         table_name=table_name,
-        names_values_sql=', '.join('{name} = %s'.format(name=name) for name in names_values.keys()),
-        where_sql=where_sql,
-    ), *(names_values.values() + where.values()))
+        names_values_sql=', '.join('"{name}" = %s'.format(name=name) for name in names_values.keys()),
+        where_sql=' AND '.join('"{name}" {op} %s'.format(name=name, op='IN' if isinstance(value, tuple) else '=') for name, value in where.items()),
+    ), *(names_values.values() + where.values())).affected
 
-#### test
+### escape_like
+
+def escape_like(fragment, prefix='%', postfix='%'):
+    return u'{prefix}{fragment}{postfix}'.format(
+        prefix=prefix,
+        fragment=fragment
+            .replace('\\', '\\\\')
+            .replace('%', '\\%')
+            .replace('_', '\\_'),
+        postfix=postfix,
+    )
+
+### test
 
 def test():
 
     pool_size = 2
-    db_config(name='test', user='user', password='password', pool_size=pool_size) # Use your database credentials!
+    db_config(name='test', user='user', password='password', pool_size=pool_size)  # Use your database credentials!
 
-    ####
+    ### async, reconnect
 
     '''
-    [0 seconds] Testing async pool, reconnect and retry.
-    [0 seconds] Pool of 2 connections.
-    [0 seconds] Started sleeping at postgresql for 5 seconds.
-    [0 seconds] Started sleeping at postgresql for 5 seconds.
-    [0 seconds] Started sleeping at postgresql for 5 seconds.
-    [0 seconds] Started sleeping at postgresql for 5 seconds.
-    [ ok ] Restarting PostgreSQL 9.1 database server: main.
-    [5 seconds] Restarted postgresql in 5.10631895065 seconds.
-    [10 seconds] Done sleeping.
-    [10 seconds] Done sleeping.
-    [15 seconds] Done sleeping.
-    [15 seconds] Done sleeping.
-    [15 seconds] Done all.
+    [0.0 seconds] Testing async pool (connections: 2), reconnect and retry:
+    [0.0 seconds] Greenlet 139815404809104 tries to "SELECT pg_sleep(5)".
+    [0.0 seconds] Greenlet 139815404810064 tries to "SELECT pg_sleep(5)".
+    [0.0 seconds] Greenlet 139815404808464 tries to "SELECT pg_sleep(5)".
+    [0.0 seconds] Greenlet 139815401537616 tries to "SELECT pg_sleep(5)".
+    [3.16 seconds] Restarted PostgreSQL in 3.16118597984 seconds.
+    # 4.18 seconds - Reconnected to PostgreSQL, trying to sleep again.
+    [9.18 seconds] Greenlet 139815404809104 stopped sleeping.
+    [9.18 seconds] Greenlet 139815404810064 stopped sleeping.
+    # Pool of 2 connections is ready for pending queries.
+    [14.18 seconds] Greenlet 139815404808464 stopped sleeping.
+    [14.18 seconds] Greenlet 139815401537616 stopped sleeping.
+    [14.18 seconds] All greenlets are done.
     '''
-
+    """
     import gevent, time
     from subprocess import Popen
+    from thread import get_ident
 
     sleep_seconds = 5
     start = time.time()
 
     def log(text):
-        print('[{seconds} seconds] {text}'.format(seconds=int(time.time() - start), text=text))
+        print('[{seconds} seconds] {text}'.format(seconds=round(time.time() - start, 2), text=text))
 
-    log('Testing async pool, reconnect and retry.')
-    log('Pool of {pool_size} connections.'.format(pool_size=pool_size))
+    log('Testing async pool (connections: {pool_size}), reconnect and retry:'.format(pool_size=pool_size))
 
     def restart_postgresql():
         start = time.time()
         Popen('sudo service postgresql restart', shell=True).communicate()
-        log('Restarted postgresql in {seconds} seconds.'.format(seconds=(time.time() - start)))
+        log('Restarted PostgreSQL in {seconds} seconds.'.format(seconds=(time.time() - start)))
 
     def sleep_at_postgresql():
-        log('Started sleeping at postgresql for {seconds} seconds.'.format(seconds=sleep_seconds))
+        greenlet_id = get_ident()
+        log('Greenlet {greenlet_id} tries to "SELECT pg_sleep({seconds})".'.format(greenlet_id=greenlet_id, seconds=sleep_seconds))
         db('SELECT pg_sleep(%s)', sleep_seconds)
-        log('Done sleeping.')
+        log('Greenlet {greenlet_id} stopped sleeping.'.format(greenlet_id=greenlet_id))
 
     gevent.joinall([
         gevent.spawn(sleep_at_postgresql)
@@ -307,20 +345,24 @@ def test():
     ] + [
         gevent.spawn(restart_postgresql),
     ])
-    log('Done all.')
+    log('All greenlets are done.')
+    """
+    ### other
 
-    ####
+    print('\nTesting other features...')
 
-    print('\nTesting db_insert(), transaction rollback and commit, IN %s, iteration, db_update().')
+    ### db
+
+    db('DROP TABLE IF EXISTS "test_item"')
 
     db('''
-        CREATE TABLE IF NOT EXISTS test_item (
-            id serial NOT NULL PRIMARY KEY,
-            parent_id integer
+        CREATE TABLE "test_item" (
+            "id" serial NOT NULL PRIMARY KEY,
+            "parent_id" integer
         )
     ''')
 
-    db('DELETE FROM test_item')
+    ### db_insert
 
     item1_id = db_insert('test_item',
         _return='id',
@@ -331,24 +373,74 @@ def test():
         _return='id',
     )
 
-    try:
-        with db_transaction():
-            assert db('SELECT id FROM test_item WHERE id = %s', item2_id).row.id == item2_id
-            db('DELETE FROM test_item WHERE id = %s', item2_id)
-            assert db('SELECT id FROM test_item WHERE id = %s', item2_id).row is None
-            raise db_rollback
-    except db_rollback:
-        pass
+    ### db_insert result, db_transaction, db_rollback, db rows iteration
 
-    items = db('SELECT id FROM test_item WHERE id IN %s', (item1_id, item2_id))
+    raised = False
+    try:
+        def code():
+            assert db('SELECT "id" FROM "test_item" WHERE id = %s', item2_id).row.id == item2_id
+            db('DELETE FROM "test_item" WHERE "id" = %s', item2_id)
+            assert db('SELECT "id" FROM "test_item" WHERE id = %s', item2_id).row is None
+            raise db_rollback
+        db_transaction(code)
+
+    except db_rollback:
+        raised = True
+    assert raised
+
+    items = db('SELECT "id" FROM "test_item" WHERE "id" IN %s', (item1_id, item2_id))
     assert set(item.id for item in items) == set([item1_id, item2_id])
 
-    assert db('SELECT parent_id FROM test_item WHERE id = %s', item2_id).row.parent_id == item1_id
-    db_update('test_item',
+    ### db_transaction result, db_update
+
+    def code():
+        return db('SELECT "parent_id" FROM "test_item" WHERE "id" = %s', item2_id).row.parent_id
+    assert db_transaction(code) == item1_id
+
+    assert db_update('test_item',
         parent_id=None,
         where=dict(id=item2_id),
+    ) == 1
+    assert db('SELECT "parent_id" FROM "test_item" WHERE "id" = %s', item2_id).row.parent_id is None
+
+    ### db_update "IN %s"
+
+    db_update('test_item',
+        parent_id=0,
+        where=dict(id=(item1_id, item2_id)),
     )
-    assert db('SELECT parent_id FROM test_item WHERE id = %s', item2_id).row.parent_id is None
+    items = db('SELECT "parent_id" FROM "test_item" WHERE "id" IN %s', (item1_id, item2_id))
+    assert [item.parent_id for item in items] == [0, 0]
+
+    ### "cannot run inside a transaction block"
+
+    db('DROP TYPE IF EXISTS "my_type"')
+    db("""CREATE TYPE "my_type" AS ENUM ('aaa', 'bbb')""")
+    raised = False
+    try:
+        db("""ALTER TYPE "my_type" ADD VALUE 'my_value'""")
+    except Exception as e:
+        raised = True
+        assert 'cannot run inside a transaction block' in repr(e)
+    assert raised
+    db("""ALTER TYPE "my_type" ADD VALUE 'my_value'""", autocommit=True)
+
+    ### escape_like
+
+    assert escape_like('\? item_percent = 42%') == r'%\\? item\_percent = 42\%%'
+
+    ### log
+
+    state = adict(logged=False)
+    def log(query):
+        sql, values = query
+        assert sql == 'UPDATE "test_item" SET "parent_id" = %s WHERE "id" = %s'
+        assert values == (42, 1)
+        state.logged = True
+
+    db_config(name=_db_config['database'], user=_db_config['user'], password=_db_config['password'], pool_size=_db_pool.qsize(), log=log)
+    db_update('test_item', parent_id=42, where=dict(id=item1_id))
+    assert state.logged
 
     print('OK')
 
