@@ -10,7 +10,7 @@ Provides:
 * raise db_rollback
 * db("""ALTER TYPE "my_type" ADD VALUE 'my_value'""", autocommit=True)  # Avoid "cannot run inside a transaction block".
 * db('SELECT * FROM "table" WHERE "name" LIKE %s', escape_like(fragment))
-* connection pool
+* connection pool blocks only for the first connection - for quick deploy
 * auto reconnect and retry
 * optional log of each query
 
@@ -21,7 +21,7 @@ Usage:
 
     from pg4geks import db, db_config, db_insert, db_update, db_transaction
     db_config(name='test', user='user', password='password')
-    # Defaults: host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True, log=None
+    # Defaults: host='127.0.0.1', port=5432, pool_size=10, pool_block=1, patch_psycopg2_with_gevent=True, log=None
 
     row = db('SELECT "column" FROM "table" WHERE "id" = %s', id).row
     assert row is None or row.column == row['column']
@@ -62,7 +62,7 @@ Usage:
 
     # See tests for more usage examples.
 
-pg4geks version 0.2.0
+pg4geks version 0.2.1
 Copyright (C) 2013-2016 by Denis Ryzhkov <denisr@denisr.com>
 MIT License, see http://opensource.org/licenses/MIT
 '''
@@ -107,9 +107,13 @@ def _gevent_wait_callback(conn, timeout=None):
         else:
             raise OperationalError('Bad result from poll: %r' % state)
 
+def _connect(N):
+    for _ in xrange(N):
+        _db_pool.put(connect(**_db_config))
+
 ### db_config
 
-def db_config(name, user, password, host='127.0.0.1', port=5432, pool_size=10, patch_psycopg2_with_gevent=True, log=None, **kwargs):
+def db_config(name, user, password, host='127.0.0.1', port=5432, pool_size=10, pool_block=1, patch_psycopg2_with_gevent=True, log=None, **kwargs):
 
     ### _db_config
 
@@ -122,8 +126,10 @@ def db_config(name, user, password, host='127.0.0.1', port=5432, pool_size=10, p
     connections_to_create = pool_size - _db_pool.qsize()
 
     if connections_to_create > 0:  # Create connections.
-        for _ in xrange(connections_to_create):
-            _db_pool.put(connect(**_db_config))
+        if pool_block > connections_to_create:
+            pool_block = connections_to_create
+        _connect(pool_block)
+        gevent.spawn(_connect, connections_to_create - pool_block)
 
     else:  # Delete connections.
         for _ in xrange(-connections_to_create):
@@ -296,7 +302,7 @@ def escape_like(fragment, prefix='%', postfix='%'):
 def test():
 
     pool_size = 2
-    db_config(name='test', user='user', password='password', pool_size=pool_size)  # Use your database credentials!
+    db_config(name='test', user='user', password='password', pool_size=pool_size, pool_block=pool_size)  # Use your database credentials!
 
     ### async, reconnect
 
@@ -315,7 +321,7 @@ def test():
     [14.18 seconds] Greenlet 139815401537616 stopped sleeping.
     [14.18 seconds] All greenlets are done.
     '''
-    """
+
     import gevent, time
     from subprocess import Popen
     from thread import get_ident
@@ -346,7 +352,7 @@ def test():
         gevent.spawn(restart_postgresql),
     ])
     log('All greenlets are done.')
-    """
+
     ### other
 
     print('\nTesting other features...')

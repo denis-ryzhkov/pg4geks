@@ -2,7 +2,7 @@ from distutils.core import setup
 
 setup(
     name='pg4geks',
-    version='0.2.0',
+    version='0.2.1',
     description='PostgreSQL for Gevent kept Simple',
     long_description='''
 Provides:
@@ -14,7 +14,7 @@ Provides:
 * ``raise db_rollback``
 * ``db("""ALTER TYPE "my_type" ADD VALUE 'my_value'""", autocommit=True)  # Avoid "cannot run inside a transaction block".``
 * ``db('SELECT * FROM "table" WHERE "name" LIKE %s', escape_like(fragment))``
-* connection pool
+* connection pool blocks only for the first connection - for quick deploy
 * auto reconnect and retry
 * optional log of each query
 
