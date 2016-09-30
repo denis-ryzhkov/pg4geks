@@ -62,7 +62,7 @@ Usage:
 
     # See tests for more usage examples.
 
-pg4geks version 0.2.1
+pg4geks version 0.2.2
 Copyright (C) 2013-2016 by Denis Ryzhkov <denisr@denisr.com>
 MIT License, see http://opensource.org/licenses/MIT
 '''
@@ -282,7 +282,11 @@ def db_update(table_name, where, **names_values):
     return db('UPDATE "{table_name}" SET {names_values_sql} WHERE {where_sql}'.format(
         table_name=table_name,
         names_values_sql=', '.join('"{name}" = %s'.format(name=name) for name in names_values.keys()),
-        where_sql=' AND '.join('"{name}" {op} %s'.format(name=name, op='IN' if isinstance(value, tuple) else '=') for name, value in where.items()),
+        where_sql=' AND '.join('"{name}" {op} %s'.format(name=name, op=(
+            'IN' if isinstance(value, tuple) else
+            'IS' if value is None else
+            '='
+        )) for name, value in where.items()),
     ), *(names_values.values() + where.values())).affected
 
 ### escape_like
