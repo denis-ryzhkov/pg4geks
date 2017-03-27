@@ -2,7 +2,7 @@ from distutils.core import setup
 
 setup(
     name='pg4geks',
-    version='0.2.2',
+    version='0.2.3',
     description='PostgreSQL for Gevent kept Simple',
     long_description='''
 Provides:

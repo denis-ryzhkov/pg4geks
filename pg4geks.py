@@ -62,8 +62,8 @@ Usage:
 
     # See tests for more usage examples.
 
-pg4geks version 0.2.2
-Copyright (C) 2013-2016 by Denis Ryzhkov <denisr@denisr.com>
+pg4geks version 0.2.3
+Copyright (C) 2013-2017 by Denis Ryzhkov <denisr@denisr.com>
 MIT License, see http://opensource.org/licenses/MIT
 '''
 
@@ -192,6 +192,7 @@ def db_transaction(code, initial_seconds=0.1, max_seconds=10.0, autocommit=False
 
                 if (
                     'connection has been closed unexpectedly' in e_repr or
+                    'closed the connection unexpectedly' in e_repr or
                     'connection already closed' in e_repr
                 ):
                     seconds_before_reconnect = initial_seconds

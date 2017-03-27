@@ -66,6 +66,6 @@ Usage:
 
     # See tests for more usage examples.
 
-pg4geks version 0.2.2  
-Copyright (C) 2013-2016 by Denis Ryzhkov <denisr@denisr.com>  
+pg4geks version 0.2.3  
+Copyright (C) 2013-2017 by Denis Ryzhkov <denisr@denisr.com>  
 MIT License, see http://opensource.org/licenses/MIT
